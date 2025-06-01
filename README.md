@@ -1,34 +1,53 @@
 # MCP Calculator Server
 
-A Model Context Protocol (MCP) compliant calculator server.
+A Model Context Protocol (MCP) server that provides calculator functionality for MCP clients.
 
 ## Features
 
-- **MCP-compliant**: Follows the [Model Context Protocol specification](https://modelcontextprotocol.io/specification/2025-03-26)
-- **Dual modes**: Supports both stdio (for MCP clients) and HTTP (for testing)
+- **Mathematical Operations**: Supports addition (+), subtraction (-), multiplication (*), and division (/)
+- **MCP Protocol Compliance**: Fully compatible with Claude Desktop and other MCP clients
 
 ## Installation
 
 ```bash
-# Clone the project
-cd mcp-calculator-server
-
-# Build the server
-go build -o calculator-server .
+go install github.com/yinebebt/mcp-calculator-server
 ```
 
-## MCP Client Integration
+## Configuration
 
-### Claude Desktop and Curosr
+### Claude Desktop Configuration
 
-Add this server to your Claude Desktop or Cursor MCP configuration:
+Add this server to your Claude Desktop configuration file:
 
 ```json
 {
   "mcpServers": {
     "calculator": {
-      "command": "mcp-calculator-server"
+      "command": "/path/to/mcp-calculator-server"
     }
   }
 }
 ```
+
+### Restart Claude Desktop
+
+After updating the configuration, restart Claude Desktop to load the new server.
+
+## Usage
+
+Once configured, you can ask Claude to perform calculations like "Can you calculate 2 + 3?"
+
+## Tool Reference
+
+### calculate
+
+Performs basic mathematical operations.
+
+**Parameters:**
+- `expression` (string, required): A mathematical expression to evaluate
+
+**Supported operations:**
+- Addition: `+`
+- Subtraction: `-`
+- Multiplication: `*`
+- Division: `/`

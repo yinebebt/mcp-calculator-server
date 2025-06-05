@@ -51,3 +51,5 @@ Performs basic mathematical operations.
 - Subtraction: `-`
 - Multiplication: `*`
 - Division: `/`
+- Parentheses: `()` for grouping
+- Negative numbers: `-5`, `(-3 + 2)`

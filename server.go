@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
+	"unicode"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -13,15 +16,15 @@ func main() {
 	// Create MCP server
 	s := server.NewMCPServer(
 		"calculator-server",
-		"0.1.0",
+		"0.2.0",
 	)
 
 	// Add calculator tool
 	s.AddTool(mcp.NewTool(
 		"calculate",
-		mcp.WithDescription("Perform basic mathematical operations like add, subtract, multiply, and divide on two numbers"),
+		mcp.WithDescription("Perform mathematical operations including basic arithmetic, parentheses, and proper operator precedence"),
 		mcp.WithString("expression",
-			mcp.Description("A mathematical expression to evaluate (e.g., '2 + 3', '10 * 5', '15 / 3')"),
+			mcp.Description("A mathematical expression to evaluate (e.g., '2 + 3', '10 * 5', '(2 + 3) * 4', '15 / 3')"),
 			mcp.Required(),
 		),
 	), handleCalculate)
@@ -73,126 +76,227 @@ func handleCalculate(_ context.Context, request mcp.CallToolRequest) (*mcp.CallT
 	}, nil
 }
 
-// evaluateExpression evaluates a simple mathematical expression
-func evaluateExpression(expr string) (float64, error) {
-	// Remove spaces
-	expr = removeSpaces(expr)
+// TokenType for expression parsing
+type TokenType int
 
-	// Find the operator
-	var op rune
-	var opIndex int = -1
+const (
+	NUMBER TokenType = iota
+	OPERATOR
+	LPAREN
+	RPAREN
+	EOF
+)
 
-	// Look for operators (from right to left for left-associative operations)
-	for i := len(expr) - 1; i >= 0; i-- {
-		switch expr[i] {
-		case '+', '-':
-			// Skip if it's at the beginning (negative number)
-			if i > 0 {
-				op = rune(expr[i])
-				opIndex = i
-				goto found
-			}
-		case '*', '/':
-			op = rune(expr[i])
-			opIndex = i
-			goto found
-		}
-	}
+type Token struct {
+	Type  TokenType
+	Value string
+}
 
-found:
-	if opIndex == -1 {
-		// No operator found, try to parse as a single number
-		return parseFloat(expr)
-	}
+// Tokenizer converts expression string into tokens
+type Tokenizer struct {
+	input string
+	pos   int
+}
 
-	// Split into left and right parts
-	left := expr[:opIndex]
-	right := expr[opIndex+1:]
-
-	if left == "" || right == "" {
-		return 0, fmt.Errorf("invalid expression: missing operand")
-	}
-
-	// Parse operands
-	leftVal, err := evaluateExpression(left)
-	if err != nil {
-		return 0, err
-	}
-
-	rightVal, err := evaluateExpression(right)
-	if err != nil {
-		return 0, err
-	}
-
-	// Perform operation
-	switch op {
-	case '+':
-		return leftVal + rightVal, nil
-	case '-':
-		return leftVal - rightVal, nil
-	case '*':
-		return leftVal * rightVal, nil
-	case '/':
-		if rightVal == 0 {
-			return 0, fmt.Errorf("division by zero is not allowed")
-		}
-		return leftVal / rightVal, nil
-	default:
-		return 0, fmt.Errorf("unsupported operation '%c'", op)
+func NewTokenizer(input string) *Tokenizer {
+	return &Tokenizer{
+		input: strings.ReplaceAll(input, " ", ""), // Remove spaces
+		pos:   0,
 	}
 }
 
-// parseFloat parses a string into a float64
-func parseFloat(s string) (float64, error) {
-	if s == "" {
-		return 0, fmt.Errorf("empty number")
+func (t *Tokenizer) NextToken() Token {
+	if t.pos >= len(t.input) {
+		return Token{Type: EOF}
 	}
 
-	var result float64
-	var decimal float64 = 1
-	var sign float64 = 1
-	var hasDecimal bool = false
+	char := rune(t.input[t.pos])
 
-	i := 0
-	if s[0] == '-' {
-		sign = -1
-		i = 1
-	} else if s[0] == '+' {
-		i = 1
+	// Handle numbers (including decimals and negative numbers)
+	if unicode.IsDigit(char) || char == '.' || (char == '-' && t.isStartOfNumber()) {
+		return t.readNumber()
 	}
 
-	for ; i < len(s); i++ {
-		char := s[i]
-		if char >= '0' && char <= '9' {
-			digit := float64(char - '0')
-			if hasDecimal {
-				decimal *= 10
-				result += digit / decimal
-			} else {
-				result = result*10 + digit
-			}
-		} else if char == '.' && !hasDecimal {
-			hasDecimal = true
+	// Handle operators
+	if char == '+' || char == '-' || char == '*' || char == '/' {
+		t.pos++
+		return Token{Type: OPERATOR, Value: string(char)}
+	}
+
+	// Handle parentheses
+	if char == '(' {
+		t.pos++
+		return Token{Type: LPAREN, Value: "("}
+	}
+
+	if char == ')' {
+		t.pos++
+		return Token{Type: RPAREN, Value: ")"}
+	}
+
+	// Invalid character
+	return Token{Type: EOF}
+}
+
+func (t *Tokenizer) isStartOfNumber() bool {
+	// Check if '-' is at the beginning or after an operator or opening parenthesis
+	if t.pos == 0 {
+		return true
+	}
+
+	prevChar := rune(t.input[t.pos-1])
+	return prevChar == '(' || prevChar == '+' || prevChar == '-' || prevChar == '*' || prevChar == '/'
+}
+
+func (t *Tokenizer) readNumber() Token {
+	start := t.pos
+
+	// Handle negative sign
+	if t.input[t.pos] == '-' {
+		t.pos++
+	}
+
+	// Read digits and decimal point
+	for t.pos < len(t.input) {
+		char := rune(t.input[t.pos])
+		if unicode.IsDigit(char) || char == '.' {
+			t.pos++
 		} else {
-			return 0, fmt.Errorf("invalid number: %s", s)
+			break
 		}
 	}
 
-	return result * sign, nil
+	return Token{Type: NUMBER, Value: t.input[start:t.pos]}
 }
 
-// removeSpaces removes all spaces from a string
-func removeSpaces(s string) string {
-	var result []rune
-	for _, char := range s {
-		if char != ' ' {
-			result = append(result, char)
+// Parser implements recursive descent parser for mathematical expressions
+type Parser struct {
+	tokenizer *Tokenizer
+	current   Token
+}
+
+func NewParser(input string) *Parser {
+	tokenizer := NewTokenizer(input)
+	return &Parser{
+		tokenizer: tokenizer,
+		current:   tokenizer.NextToken(),
+	}
+}
+
+func (p *Parser) advance() {
+	p.current = p.tokenizer.NextToken()
+}
+
+func (p *Parser) Parse() (float64, error) {
+	result, err := p.parseExpression()
+	if err != nil {
+		return 0, err
+	}
+
+	if p.current.Type != EOF {
+		return 0, fmt.Errorf("unexpected token: %s", p.current.Value)
+	}
+
+	return result, nil
+}
+
+// parseExpression handles addition and subtraction (lowest precedence)
+func (p *Parser) parseExpression() (float64, error) {
+	left, err := p.parseTerm()
+	if err != nil {
+		return 0, err
+	}
+
+	for p.current.Type == OPERATOR && (p.current.Value == "+" || p.current.Value == "-") {
+		op := p.current.Value
+		p.advance()
+
+		right, err := p.parseTerm()
+		if err != nil {
+			return 0, err
+		}
+
+		switch op {
+		case "+":
+			left = left + right
+		case "-":
+			left = left - right
 		}
 	}
-	return string(result)
+
+	return left, nil
+}
+
+// parseTerm handles multiplication and division (higher precedence)
+func (p *Parser) parseTerm() (float64, error) {
+	left, err := p.parseFactor()
+	if err != nil {
+		return 0, err
+	}
+
+	for p.current.Type == OPERATOR && (p.current.Value == "*" || p.current.Value == "/") {
+		op := p.current.Value
+		p.advance()
+
+		right, err := p.parseFactor()
+		if err != nil {
+			return 0, err
+		}
+
+		switch op {
+		case "*":
+			left = left * right
+		case "/":
+			if right == 0 {
+				return 0, fmt.Errorf("division by zero is not allowed")
+			}
+			left = left / right
+		}
+	}
+
+	return left, nil
+}
+
+// parseFactor handles numbers and parentheses (highest precedence)
+func (p *Parser) parseFactor() (float64, error) {
+	if p.current.Type == NUMBER {
+		value, err := strconv.ParseFloat(p.current.Value, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid number: %s", p.current.Value)
+		}
+		p.advance()
+		return value, nil
+	}
+
+	if p.current.Type == LPAREN {
+		p.advance() // consume '('
+		result, err := p.parseExpression()
+		if err != nil {
+			return 0, err
+		}
+
+		if p.current.Type != RPAREN {
+			return 0, fmt.Errorf("expected closing parenthesis")
+		}
+		p.advance() // consume ')'
+		return result, nil
+	}
+
+	return 0, fmt.Errorf("unexpected token: %s", p.current.Value)
+}
+
+// evaluateExpression evaluates a mathematical expression with proper precedence
+func evaluateExpression(expr string) (float64, error) {
+	if strings.TrimSpace(expr) == "" {
+		return 0, fmt.Errorf("empty expression")
+	}
+
+	parser := NewParser(expr)
+	return parser.Parse()
 }
 
 // formatResult formats the calculation result
 func formatResult(result float64) string {
-	return fmt.Sprintf("%.10g", result)
+	// Use Go's smart formatting - removes unnecessary decimal places
+	return strconv.FormatFloat(result, 'g', -1, 64)
 }

@@ -45,7 +45,7 @@ type Client struct {
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run -tags=client client.go <your-mcp-server-binary> [args...]")
-		fmt.Println("Example: go run -tags=client client.go ./mcp-calculator-server")
+		fmt.Println("Example: go run -tags=client client.go ./calculator-server")
 		os.Exit(1)
 	}
 
@@ -54,6 +54,9 @@ func main() {
 	// Start your MCP server
 	args := os.Args[2:] // Skip program name and server binary
 	cmd := exec.Command(os.Args[1], args...)
+
+	// Set environment to force stdio transport mode
+	cmd.Env = append(os.Environ(), "TRANSPORT=stdio")
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -262,8 +265,9 @@ func (c *Client) printMenu() {
 
 func (c *Client) testBasicCalculation() {
 	fmt.Println("\nRunning calculation test...")
+
 	expr := "((2 + 3) * -4) / 2"
-	result, err := c.callCalculator("((2 + 3) * -4) / 2")
+	result, err := c.callCalculator(expr)
 	if err != nil {
 		fmt.Printf(" %s = ERROR: %v\n", expr, err)
 	} else {

@@ -1,52 +1,84 @@
 # MCP Calculator Server
 
-A Model Context Protocol (MCP) server that provides calculator functionality for MCP clients.
+A Model Context Protocol (MCP) server that provides calculator functionality with support for mathematical expressions.
 
 ## Features
 
-- **Mathematical Operations**: Supports addition (+), subtraction (-), multiplication (*), and division (/)
-- **MCP Protocol Compliance**: Fully compatible with Claude Desktop and other MCP clients
+- **Mathematical Operations**: Addition (+), subtraction (-), multiplication (*), division (/)
+- **Expression Parsing**: Proper operator precedence and parentheses support
+- **Dual Transport Modes**:
+  - **stdio** for local development and MCP Inspector
+  - **streamable-http** for web deployments and containers
+- **Health Check Endpoint**: Health monitoring for HTTP deployments
+
+## Transport Configuration
+
+Simple environment-based configuration:
+
+```bash
+TRANSPORT=stdio        # For local development/debugging
+TRANSPORT=streamable-http  # For web deployments (default)
+```
+
+Default Behavior
+
+- **Default**: `streamable-http` (if no TRANSPORT is set)
+- **Port**: 8080 (configurable via PORT environment variable)
 
 ## Installation
 
+Build the server:
+
 ```bash
-go install github.com/yinebebt/mcp-calculator-server
+go build -o mcp-calculator-server server.go
 ```
-
-## Configuration
-
-### Claude Desktop Configuration
-
-Add this server to your Claude Desktop configuration file:
-
-```json
-{
-  "mcpServers": {
-    "calculator": {
-      "command": "/path/to/mcp-calculator-server"
-    }
-  }
-}
-```
-
-### Restart Claude Desktop
-
-After updating the configuration, restart Claude Desktop to load the new server.
 
 ## Usage
 
-Once configured, you can ask Claude to perform calculations like "Can you calculate 2 + 3?"
+### Local Development (stdio)
+
+```bash
+TRANSPORT=stdio ./mcp-calculator-server
+```
+
+### Web Deployment (streamable-http, default)
+
+```bash
+./mcp-calculator-server
+# or explicitly:
+TRANSPORT=streamable-http PORT=8080 ./mcp-calculator-server
+```
+
+### MCP Inspector Configuration
+
+```bash
+Command: /path/to/calculator-server
+Environment: TRANSPORT=stdio
+```
+
+### Testing with Client
+
+```bash
+go run -tags=client client.go ./calculator-server
+```
+
+## HTTP Endpoints (streamable-http mode)
+
+- **MCP Endpoint**: `http://localhost:8080/mcp`
+- **Health Check**: `http://localhost:8080/health`
 
 ## Tool Reference
 
 ### calculate
 
-Performs basic mathematical operations.
+Performs mathematical operations with proper operator precedence and implicit multiplication.
 
 **Parameters:**
-- `expression` (string, required): A mathematical expression to evaluate
 
-**Supported operations:**
+- `expression` (string, required): Mathematical expression to evaluate
+
+**Supported Operations:**
+
 - Addition: `+`
 - Subtraction: `-`
 - Multiplication: `*`

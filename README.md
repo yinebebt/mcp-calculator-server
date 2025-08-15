@@ -1,87 +1,45 @@
 # MCP Calculator Server
 
-A Model Context Protocol (MCP) server that provides calculator functionality with support for mathematical expressions.
+A Model Context Protocol (MCP) server that provides calculator functionality.
 
 ## Features
 
-- **Mathematical Operations**: Addition (+), subtraction (-), multiplication (*), division (/)
-- **Expression Parsing**: Proper operator precedence and parentheses support
-- **Dual Transport Modes**:
-  - **stdio** for local development and MCP Inspector
-  - **streamable-http** for web deployments and containers
-- **Health Check Endpoint**: Health monitoring for HTTP deployments
+### Tools
+- **calculate**: Mathematical operations with proper operator precedence
+- **random_number**: Generate random numbers within specified ranges
 
-## Transport Configuration
+### Resources
+- **math://constants**: Mathematical constants (π, e, φ, √2, ln2, ln10) in JSON format
+- **server://info**: Server information and capabilities overview
 
-Simple environment-based configuration:
+### Prompts
+- **math_problem**: Generate mathematical word problems with configurable difficulty and topics
+- **explain_calculation**: Step-by-step mathematical expression explanations
 
-```bash
-TRANSPORT=stdio        # For local development/debugging
-TRANSPORT=streamable-http  # For web deployments (default)
-```
+### Transport Modes
+- **stdio**: For local development and MCP Inspector integration
+- **streamable-http**: For web deployments and container environments
 
-Default Behavior
-
-- **Default**: `streamable-http` (if no TRANSPORT is set)
-- **Port**: 8080 (configurable via PORT environment variable)
-
-## Installation
-
-Build the server:
-
-```bash
-go build -o mcp-calculator-server server.go
-```
+**Default Behavior:**
+- Transport: `streamable-http` (if no TRANSPORT environment variable is set)
+- Port: `8080` (configurable via PORT environment variable)
 
 ## Usage
 
-### Local Development (stdio)
+```sh
+go install github.com/yinebebt/mcp-calculator-server@latest
 
-```bash
 TRANSPORT=stdio ./mcp-calculator-server
 ```
 
-### Web Deployment (streamable-http, default)
+### MCP Client Configuration
+For testing with MCP Client:
 
-```bash
-./mcp-calculator-server
-# or explicitly:
-TRANSPORT=streamable-http PORT=8080 ./mcp-calculator-server
+```json
+{
+  "command": "/path/to/mcp-calculator-server",
+  "env": {
+    "TRANSPORT": "stdio"
+  }
+}
 ```
-
-### MCP Inspector Configuration
-
-```bash
-Command: /path/to/calculator-server
-Environment: TRANSPORT=stdio
-```
-
-### Testing with Client
-
-```bash
-go run -tags=client client.go ./calculator-server
-```
-
-## HTTP Endpoints (streamable-http mode)
-
-- **MCP Endpoint**: `http://localhost:8080/mcp`
-- **Health Check**: `http://localhost:8080/health`
-
-## Tool Reference
-
-### calculate
-
-Performs mathematical operations with proper operator precedence and implicit multiplication.
-
-**Parameters:**
-
-- `expression` (string, required): Mathematical expression to evaluate
-
-**Supported Operations:**
-
-- Addition: `+`
-- Subtraction: `-`
-- Multiplication: `*`
-- Division: `/`
-- Parentheses: `()` for grouping
-- Negative numbers: `-5`, `(-3 + 2)`

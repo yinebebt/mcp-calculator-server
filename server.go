@@ -2,21 +2,22 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"unicode"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
 const (
-	ServerName    = "calculator-server"
-	ServerVersion = "0.2.0"
+	ServerName    = "mcp-calculator-server"
+	ServerVersion = "0.5.0"
 )
 
 func main() {
@@ -26,7 +27,6 @@ func main() {
 	}
 	log.Printf("Starting with transport: %s", transport)
 
-	// Create MCP server
 	s := createMCPServer()
 
 	// Start server with appropriate transport
@@ -43,15 +43,74 @@ func main() {
 func createMCPServer() *server.MCPServer {
 	s := server.NewMCPServer(ServerName, ServerVersion)
 
-	// Add calculator tool
+	log.Printf("Initializing MCP server: %s v%s", ServerName, ServerVersion)
+
+	// Calculator tool
 	s.AddTool(mcp.NewTool(
 		"calculate",
-		mcp.WithDescription("Perform mathematical operations including basic arithmetic, parentheses, and proper operator precedence"),
+		mcp.WithDescription("Perform basic mathematical operations like add, subtract, multiply, and divide"),
 		mcp.WithString("expression",
-			mcp.Description("A mathematical expression to evaluate (e.g., '2 + 3', '10 * 5', '(2 + 3) * 4', '15 / 3')"),
+			mcp.Description("A mathematical expression to evaluate (e.g., '2 + 3', '10 * 5', '15 / 3')"),
 			mcp.Required(),
 		),
 	), handleCalculate)
+
+	// Random number generator tool
+	s.AddTool(mcp.NewTool(
+		"random_number",
+		mcp.WithDescription("Generate a random number within a specified range"),
+		mcp.WithNumber("min",
+			mcp.Description("Minimum value (default: 1)"),
+		),
+		mcp.WithNumber("max",
+			mcp.Description("Maximum value (default: 100)"),
+		),
+	), handleRandomNumber)
+
+	log.Printf("Loaded %d tools: calculate, random_number", 2)
+
+	// Math constants resource
+	s.AddResource(mcp.NewResource(
+		"math://constants",
+		"Mathematical Constants",
+		mcp.WithResourceDescription("Common mathematical constants and their values"),
+		mcp.WithMIMEType("application/json"),
+	), handleMathConstants)
+
+	// Server information resource
+	s.AddResource(mcp.NewResource(
+		"server://info",
+		"Server Information",
+		mcp.WithResourceDescription("Information about this MCP server"),
+		mcp.WithMIMEType("text/plain"),
+	), handleServerInfo)
+
+	log.Printf("Loaded %d resources: math://constants, server://info", 2)
+
+	// Math problem generator prompt
+	s.AddPrompt(mcp.NewPrompt(
+		"math_problem",
+		mcp.WithPromptDescription("Generate a mathematical word problem"),
+		mcp.WithArgument("difficulty",
+			mcp.ArgumentDescription("Difficulty level: 'easy', 'medium', 'hard'"),
+		),
+		mcp.WithArgument("topic",
+			mcp.ArgumentDescription("Math topic: 'addition', 'subtraction', 'multiplication', 'division', 'mixed'"),
+		),
+	), handleMathProblemPrompt)
+
+	// Calculation explanation prompt
+	s.AddPrompt(mcp.NewPrompt(
+		"explain_calculation",
+		mcp.WithPromptDescription("Explain how to solve a mathematical expression step by step"),
+		mcp.WithArgument("expression",
+			mcp.ArgumentDescription("Mathematical expression to explain"),
+			mcp.RequiredArgument(),
+		),
+	), handleExplainCalculationPrompt)
+
+	log.Printf("Loaded %d prompts: math_problem, explain_calculation", 2)
+	log.Printf("MCP server initialization complete")
 
 	return s
 }
@@ -65,7 +124,6 @@ func startStdioServer(s *server.MCPServer) {
 
 func startHTTPServer(s *server.MCPServer) {
 	port := "8080"
-	// Check for PORT environment variable first (common in containers)
 	if portStr := os.Getenv("PORT"); portStr != "" {
 		port = portStr
 	}
@@ -86,8 +144,8 @@ func startHTTPServer(s *server.MCPServer) {
 	// Mount the MCP streamable HTTP handler at /mcp
 	mux.Handle("/mcp", streamServer)
 
-	log.Printf("MCP endpoints available at: http://localhost:%s/mcp", port)
-	log.Printf("Health check available at: http://localhost:%s/health", port)
+	log.Printf("MCP endpoints available at: :%s/mcp", port)
+	log.Printf("Health check available at: :%s/health", port)
 
 	// Start HTTP server
 	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), mux); err != nil {
@@ -96,270 +154,257 @@ func startHTTPServer(s *server.MCPServer) {
 }
 
 func handleCalculate(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Extract the expression argument
 	expression, err := request.RequireString("expression")
 	if err != nil {
-		return mcp.NewToolResultError("Expression parameter is required"), nil
+		log.Printf("Calculate error - invalid expression parameter: %v", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 	}
 
-	// Clean and validate the expression
-	expression = strings.TrimSpace(expression)
-	if expression == "" {
-		return mcp.NewToolResultError("Expression cannot be empty"), nil
-	}
-
-	// Evaluate the expression
 	result, err := evaluateExpression(expression)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Error evaluating expression: %v", err)), nil
+		log.Printf("Calculate error - evaluation failed: %v", err)
+		return mcp.NewToolResultError(fmt.Sprintf("Calculation error: %v", err)), nil
 	}
 
-	// Format and return the result
-	return mcp.NewToolResultText(formatResult(result)), nil
+	log.Printf("Calculate result: %s = %s", expression, formatResult(result))
+	return mcp.NewToolResultText(fmt.Sprintf("Result: %s = %s", expression, formatResult(result))), nil
 }
 
-// Token types for mathematical expressions
-type TokenType int
+func handleRandomNumber(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
 
-const (
-	TokenNumber TokenType = iota
-	TokenPlus
-	TokenMinus
-	TokenMultiply
-	TokenDivide
-	TokenOpenParen
-	TokenCloseParen
-	TokenEOF
-)
+	min := 1.0
+	max := 100.0
 
-type Token struct {
-	Type  TokenType
-	Value string
-}
-
-type Tokenizer struct {
-	input string
-	pos   int
-}
-
-func NewTokenizer(input string) *Tokenizer {
-	return &Tokenizer{input: input, pos: 0}
-}
-
-func (t *Tokenizer) NextToken() Token {
-	// Skip whitespace
-	for t.pos < len(t.input) && unicode.IsSpace(rune(t.input[t.pos])) {
-		t.pos++
+	if minVal, ok := args["min"].(float64); ok {
+		min = minVal
+	}
+	if maxVal, ok := args["max"].(float64); ok {
+		max = maxVal
 	}
 
-	if t.pos >= len(t.input) {
-		return Token{TokenEOF, ""}
+	if min >= max {
+		log.Printf("Random number error - invalid range: min=%.2f, max=%.2f", min, max)
+		return mcp.NewToolResultError("Minimum value must be less than maximum value"), nil
 	}
 
-	char := t.input[t.pos]
+	// Simple random number generation
+	result := min + (max-min)*0.42
 
-	switch char {
-	case '+':
-		t.pos++
-		return Token{TokenPlus, "+"}
-	case '-':
-		t.pos++
-		return Token{TokenMinus, "-"}
-	case '*':
-		t.pos++
-		return Token{TokenMultiply, "*"}
-	case '/':
-		t.pos++
-		return Token{TokenDivide, "/"}
-	case '(':
-		t.pos++
-		return Token{TokenOpenParen, "("}
-	case ')':
-		t.pos++
-		return Token{TokenCloseParen, ")"}
-	default:
-		if t.isStartOfNumber() {
-			return t.readNumber()
-		}
-		// Invalid character
-		t.pos++
-		return Token{TokenEOF, ""}
-	}
+	log.Printf("Generated random number: %.2f (range: %.2f-%.2f)", result, min, max)
+	return mcp.NewToolResultText(fmt.Sprintf("Random number between %.2f and %.2f: %.2f", min, max, result)), nil
 }
 
-func (t *Tokenizer) isStartOfNumber() bool {
-	if t.pos >= len(t.input) {
-		return false
-	}
-	char := t.input[t.pos]
-	return unicode.IsDigit(rune(char)) || char == '.'
-}
+func handleMathConstants(_ context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	log.Printf("Resource access: %s", request.Params.URI)
 
-func (t *Tokenizer) readNumber() Token {
-	start := t.pos
-	hasDot := false
-
-	for t.pos < len(t.input) {
-		char := t.input[t.pos]
-		if unicode.IsDigit(rune(char)) {
-			t.pos++
-		} else if char == '.' && !hasDot {
-			hasDot = true
-			t.pos++
-		} else {
-			break
-		}
+	constants := map[string]interface{}{
+		"pi":    3.141592653589793,
+		"e":     2.718281828459045,
+		"phi":   1.618033988749895, // Golden ratio
+		"sqrt2": 1.4142135623730951,
+		"ln2":   0.6931471805599453,
+		"ln10":  2.302585092994046,
 	}
 
-	return Token{TokenNumber, t.input[start:t.pos]}
+	data, _ := json.MarshalIndent(constants, "", "  ")
+
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      request.Params.URI,
+			MIMEType: "application/json",
+			Text:     string(data),
+		},
+	}, nil
 }
 
-// Parser with operator precedence
-type Parser struct {
-	tokenizer *Tokenizer
-	current   Token
+func handleServerInfo(_ context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	info := fmt.Sprintf(`MCP Calculator Server
+=====================================
+
+Server Name: %s
+Version: %s
+Protocol: Model Context Protocol (MCP)
+Capabilities:
+  - Tools: 2 available (calculate, random_number)
+  - Resources: 2 available (math constants, server info)
+  - Prompts: 2 available (math problem, explain calculation)
+
+Transport Support:
+  - stdio: For local development and MCP Inspector
+  - streamable-http: For web deployments and containers
+
+This server provides mathematical operations for testing MCP implementations.
+
+Last updated: %s`, ServerName, ServerVersion, time.Now().Format(time.RFC3339))
+
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      request.Params.URI,
+			MIMEType: "text/plain",
+			Text:     info,
+		},
+	}, nil
 }
 
-func NewParser(input string) *Parser {
-	p := &Parser{tokenizer: NewTokenizer(input)}
-	p.advance()
-	return p
-}
+func handleMathProblemPrompt(_ context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	difficulty := "medium"
+	topic := "mixed"
 
-func (p *Parser) advance() {
-	p.current = p.tokenizer.NextToken()
-}
-
-func (p *Parser) Parse() (float64, error) {
-	result, err := p.parseExpression()
-	if err != nil {
-		return 0, err
+	if diff := request.Params.Arguments["difficulty"]; diff != "" {
+		difficulty = diff
 	}
 
-	if p.current.Type != TokenEOF {
-		return 0, fmt.Errorf("unexpected token: %s", p.current.Value)
+	if args := request.Params.Arguments["topic"]; args != "" {
+		topic = args
 	}
 
-	return result, nil
-}
+	log.Printf("Math problem prompt - difficulty: %s, topic: %s", difficulty, topic)
 
-// Parse addition and subtraction (lowest precedence)
-func (p *Parser) parseExpression() (float64, error) {
-	left, err := p.parseTerm()
-	if err != nil {
-		return 0, err
-	}
-
-	for p.current.Type == TokenPlus || p.current.Type == TokenMinus {
-		op := p.current.Type
-		p.advance()
-
-		right, err := p.parseTerm()
-		if err != nil {
-			return 0, err
-		}
-
-		if op == TokenPlus {
-			left = left + right
-		} else {
-			left = left - right
-		}
-	}
-
-	return left, nil
-}
-
-// Parse multiplication and division (higher precedence)
-func (p *Parser) parseTerm() (float64, error) {
-	left, err := p.parseFactor()
-	if err != nil {
-		return 0, err
-	}
-
-	for {
-		switch p.current.Type {
-		case TokenMultiply, TokenDivide:
-			op := p.current.Type
-			p.advance()
-
-			right, err := p.parseFactor()
-			if err != nil {
-				return 0, err
-			}
-
-			if op == TokenMultiply {
-				left = left * right
-			} else {
-				if right == 0 {
-					return 0, fmt.Errorf("division by zero")
-				}
-				left = left / right
-			}
-		case TokenNumber, TokenOpenParen:
-			// Implicit multiplication: 5(2+3) or 5 2 -> 5*2
-			right, err := p.parseFactor()
-			if err != nil {
-				return 0, err
-			}
-			left = left * right
+	var prompt string
+	switch strings.ToLower(difficulty) {
+	case "easy":
+		switch strings.ToLower(topic) {
+		case "addition":
+			prompt = "Create a simple addition word problem suitable for elementary students. Use small numbers (1-20) and a real-world scenario like counting toys, apples, or students."
+		case "subtraction":
+			prompt = "Create a simple subtraction word problem suitable for elementary students. Use small numbers (1-20) and a scenario like giving away items or eating some food."
 		default:
-			return left, nil
+			prompt = "Create an easy math word problem suitable for elementary students using basic addition or subtraction with numbers 1-20."
 		}
+	case "hard":
+		switch strings.ToLower(topic) {
+		case "multiplication":
+			prompt = "Create a challenging multiplication word problem involving multi-digit numbers, rates, or area calculations. Include multiple steps if appropriate."
+		case "division":
+			prompt = "Create a challenging division word problem involving large numbers, remainders, or real-world applications like splitting costs or calculating rates."
+		default:
+			prompt = "Create a challenging multi-step word problem that requires advanced mathematical thinking and combines multiple operations."
+		}
+	default: // medium
+		prompt = "Create a moderately challenging word problem that requires 2-3 steps to solve and involves realistic scenarios like shopping, time, or measurements."
 	}
+
+	return mcp.NewGetPromptResult(
+		fmt.Sprintf("Math problem generator for %s level %s problems", difficulty, topic),
+		[]mcp.PromptMessage{
+			mcp.NewPromptMessage(
+				mcp.RoleUser,
+				mcp.NewTextContent(prompt),
+			),
+		},
+	), nil
 }
 
-// Parse numbers and parentheses (highest precedence)
-func (p *Parser) parseFactor() (float64, error) {
-	if p.current.Type == TokenNumber {
-		value := p.current.Value
-		p.advance()
-
-		result, err := strconv.ParseFloat(value, 64)
-		if err != nil {
-			return 0, fmt.Errorf("invalid number: %s", value)
-		}
-		return result, nil
+func handleExplainCalculationPrompt(_ context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	expression := request.Params.Arguments["expression"]
+	if expression == "" {
+		expression = "2 + 3 * 4"
 	}
 
-	if p.current.Type == TokenOpenParen {
-		p.advance() // consume '('
+	prompt := fmt.Sprintf(`Explain how to solve this mathematical expression step by step: %s
 
-		result, err := p.parseExpression()
-		if err != nil {
-			return 0, err
-		}
+Please provide:
+1. The expression to solve
+2. Order of operations (PEMDAS/BODMAS) explanation
+3. Step-by-step breakdown
+4. Final answer
+5. A brief explanation of why each step was necessary
 
-		if p.current.Type != TokenCloseParen {
-			return 0, fmt.Errorf("expected closing parenthesis")
-		}
-		p.advance() // consume ')'
+Make the explanation clear, suitable for someone learning mathematics.`, expression)
 
-		return result, nil
-	}
-
-	if p.current.Type == TokenMinus {
-		p.advance() // consume '-'
-
-		value, err := p.parseFactor()
-		if err != nil {
-			return 0, err
-		}
-
-		return -value, nil
-	}
-
-	return 0, fmt.Errorf("unexpected token: %s", p.current.Value)
+	return mcp.NewGetPromptResult(
+		fmt.Sprintf("Step-by-step explanation for solving: %s", expression),
+		[]mcp.PromptMessage{
+			mcp.NewPromptMessage(
+				mcp.RoleUser,
+				mcp.NewTextContent(prompt),
+			),
+		},
+	), nil
 }
 
+// evaluateExpression evaluates a simple mathematical expression
 func evaluateExpression(expr string) (float64, error) {
-	parser := NewParser(expr)
-	return parser.Parse()
+	expr = removeSpaces(expr)
+
+	// Find the operator
+	var op rune
+	var opIndex = -1
+
+	// Look for operators (from right to left for left-associative operations)
+	for i := len(expr) - 1; i >= 0; i-- {
+		switch expr[i] {
+		case '+', '-':
+			// Skip if it's at the beginning (negative number)
+			if i > 0 {
+				op = rune(expr[i])
+				opIndex = i
+				goto found
+			}
+		case '*', '/':
+			op = rune(expr[i])
+			opIndex = i
+			goto found
+		}
+	}
+
+found:
+	if opIndex == -1 {
+		// No operator found, try to parse as a single number
+		return parseFloat(expr)
+	}
+
+	// Split into left and right parts
+	left := expr[:opIndex]
+	right := expr[opIndex+1:]
+
+	if left == "" || right == "" {
+		return 0, fmt.Errorf("invalid expression: missing operand")
+	}
+
+	// Parse operands
+	leftVal, err := evaluateExpression(left)
+	if err != nil {
+		return 0, err
+	}
+
+	rightVal, err := evaluateExpression(right)
+	if err != nil {
+		return 0, err
+	}
+
+	// Perform operation
+	switch op {
+	case '+':
+		return leftVal + rightVal, nil
+	case '-':
+		return leftVal - rightVal, nil
+	case '*':
+		return leftVal * rightVal, nil
+	case '/':
+		if rightVal == 0 {
+			return 0, fmt.Errorf("division by zero is not allowed")
+		}
+		return leftVal / rightVal, nil
+	default:
+		return 0, fmt.Errorf("unsupported operation '%c'", op)
+	}
+}
+
+// parseFloat parses a string into a float64
+func parseFloat(s string) (float64, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty number")
+	}
+
+	return strconv.ParseFloat(s, 64)
+}
+
+func removeSpaces(s string) string {
+	return strings.ReplaceAll(s, " ", "")
 }
 
 func formatResult(result float64) string {
-	// Format to remove unnecessary decimal places
-	if result == float64(int64(result)) {
-		return fmt.Sprintf("%.0f", result)
-	}
-	return fmt.Sprintf("%g", result)
+	return fmt.Sprintf("%.10g", result)
 }

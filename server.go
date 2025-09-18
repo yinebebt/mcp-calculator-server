@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"math/big"
 	"net/http"
 	"os"
 	"strconv"
@@ -17,7 +20,7 @@ import (
 
 const (
 	ServerName    = "mcp-calculator-server"
-	ServerVersion = "0.5.0"
+	ServerVersion = "0.5.1"
 )
 
 func main() {
@@ -32,7 +35,10 @@ func main() {
 	// Start server with appropriate transport
 	switch transport {
 	case "stdio":
-		startStdioServer(s)
+		log.Println("starting server with stdio transport")
+		if err := server.ServeStdio(s); err != nil {
+			log.Fatalf("Stdio server error: %v", err)
+		}
 	case "streamable-http":
 		startHTTPServer(s)
 	default:
@@ -67,7 +73,7 @@ func createMCPServer() *server.MCPServer {
 		),
 	), handleRandomNumber)
 
-	log.Printf("Loaded %d tools: calculate, random_number", 2)
+	log.Println("Loaded tools: calculate, random_number")
 
 	// Math constants resource
 	s.AddResource(mcp.NewResource(
@@ -85,7 +91,7 @@ func createMCPServer() *server.MCPServer {
 		mcp.WithMIMEType("text/plain"),
 	), handleServerInfo)
 
-	log.Printf("Loaded %d resources: math://constants, server://info", 2)
+	log.Println("Loaded resources: math://constants, server://info")
 
 	// Math problem generator prompt
 	s.AddPrompt(mcp.NewPrompt(
@@ -109,17 +115,10 @@ func createMCPServer() *server.MCPServer {
 		),
 	), handleExplainCalculationPrompt)
 
-	log.Printf("Loaded %d prompts: math_problem, explain_calculation", 2)
-	log.Printf("MCP server initialization complete")
+	log.Println("Loaded prompts: math_problem, explain_calculation")
+	log.Println("MCP server initialization complete")
 
 	return s
-}
-
-func startStdioServer(s *server.MCPServer) {
-	log.Println("Starting MCP server with stdio transport")
-	if err := server.ServeStdio(s); err != nil {
-		log.Fatalf("Stdio server error: %v", err)
-	}
 }
 
 func startHTTPServer(s *server.MCPServer) {
@@ -128,7 +127,7 @@ func startHTTPServer(s *server.MCPServer) {
 		port = portStr
 	}
 
-	log.Printf("Starting MCP server with Streamable HTTP transport on port %s", port)
+	log.Printf("starting server with streamable-http transport on port %s", port)
 
 	// Create streamable HTTP server
 	streamServer := server.NewStreamableHTTPServer(s)
@@ -138,14 +137,13 @@ func startHTTPServer(s *server.MCPServer) {
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		if _, err := w.Write([]byte("OK")); err != nil {
+			log.Printf("Health check write error: %v", err)
+		}
 	})
 
 	// Mount the MCP streamable HTTP handler at /mcp
 	mux.Handle("/mcp", streamServer)
-
-	log.Printf("MCP endpoints available at: :%s/mcp", port)
-	log.Printf("Health check available at: :%s/health", port)
 
 	// Start HTTP server
 	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), mux); err != nil {
@@ -160,10 +158,36 @@ func handleCalculate(_ context.Context, request mcp.CallToolRequest) (*mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("Error: %v", err)), nil
 	}
 
+	// Validate expression length and characters
+	if len(expression) == 0 {
+		log.Printf("Calculate error - empty expression")
+		return mcp.NewToolResultError("Expression cannot be empty"), nil
+	}
+
+	if len(expression) > 500 {
+		log.Printf("Calculate error - expression too long: %d characters", len(expression))
+		return mcp.NewToolResultError("Expression too long (maximum 500 characters)"), nil
+	}
+
+	// Check for valid characters
+	validChars := "0123456789+-*/.()eE "
+	for _, char := range expression {
+		if !strings.ContainsRune(validChars, char) {
+			log.Printf("Calculate error - invalid character: %c", char)
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid character in expression: '%c'", char)), nil
+		}
+	}
+
 	result, err := evaluateExpression(expression)
 	if err != nil {
 		log.Printf("Calculate error - evaluation failed: %v", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Calculation error: %v", err)), nil
+	}
+
+	// Check for special float values, NaN check
+	if math.IsNaN(result) {
+		log.Printf("Calculate error - result is NaN")
+		return mcp.NewToolResultError("Calculation resulted in an invalid number (NaN)"), nil
 	}
 
 	log.Printf("Calculate result: %s = %s", expression, formatResult(result))
@@ -173,26 +197,41 @@ func handleCalculate(_ context.Context, request mcp.CallToolRequest) (*mcp.CallT
 func handleRandomNumber(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := request.GetArguments()
 
-	min := 1.0
-	max := 100.0
+	minm := 1.0
+	maxi := 100.0
 
 	if minVal, ok := args["min"].(float64); ok {
-		min = minVal
+		minm = minVal
 	}
 	if maxVal, ok := args["max"].(float64); ok {
-		max = maxVal
+		maxi = maxVal
 	}
 
-	if min >= max {
-		log.Printf("Random number error - invalid range: min=%.2f, max=%.2f", min, max)
+	if minm >= maxi {
+		log.Printf("Random number error - invalid range: min=%.2f, max=%.2f", minm, maxi)
 		return mcp.NewToolResultError("Minimum value must be less than maximum value"), nil
 	}
 
-	// Simple random number generation
-	result := min + (max-min)*0.42
+	// Generate random number
+	diff := maxi - minm
 
-	log.Printf("Generated random number: %.2f (range: %.2f-%.2f)", result, min, max)
-	return mcp.NewToolResultText(fmt.Sprintf("Random number between %.2f and %.2f: %.2f", min, max, result)), nil
+	precision := int64(10000) // 4 decimal places
+	maxInt := int64(diff * float64(precision))
+
+	if maxInt <= 0 {
+		maxInt = 1
+	}
+
+	randInt, err := rand.Int(rand.Reader, big.NewInt(maxInt))
+	if err != nil {
+		log.Printf("Random number generation error: %v", err)
+		return mcp.NewToolResultError("Failed to generate random number"), nil
+	}
+
+	result := minm + (float64(randInt.Int64()) / float64(precision))
+
+	log.Printf("Generated random number: %.4f (range: %.2f-%.2f)", result, minm, maxi)
+	return mcp.NewToolResultText(fmt.Sprintf("Random number between %.2f and %.2f: %.6f", minm, maxi, result)), nil
 }
 
 func handleMathConstants(_ context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
@@ -324,81 +363,199 @@ Make the explanation clear, suitable for someone learning mathematics.`, express
 	), nil
 }
 
-// evaluateExpression evaluates a simple mathematical expression
+// evaluateExpression evaluates a mathematical expression with proper operator precedence and parentheses support
 func evaluateExpression(expr string) (float64, error) {
 	expr = removeSpaces(expr)
-
-	// Find the operator
-	var op rune
-	var opIndex = -1
-
-	// Look for operators (from right to left for left-associative operations)
-	for i := len(expr) - 1; i >= 0; i-- {
-		switch expr[i] {
-		case '+', '-':
-			// Skip if it's at the beginning (negative number)
-			if i > 0 {
-				op = rune(expr[i])
-				opIndex = i
-				goto found
-			}
-		case '*', '/':
-			op = rune(expr[i])
-			opIndex = i
-			goto found
-		}
+	if expr == "" {
+		return 0, fmt.Errorf("empty expression")
 	}
-
-found:
-	if opIndex == -1 {
-		// No operator found, try to parse as a single number
-		return parseFloat(expr)
-	}
-
-	// Split into left and right parts
-	left := expr[:opIndex]
-	right := expr[opIndex+1:]
-
-	if left == "" || right == "" {
-		return 0, fmt.Errorf("invalid expression: missing operand")
-	}
-
-	// Parse operands
-	leftVal, err := evaluateExpression(left)
-	if err != nil {
-		return 0, err
-	}
-
-	rightVal, err := evaluateExpression(right)
-	if err != nil {
-		return 0, err
-	}
-
-	// Perform operation
-	switch op {
-	case '+':
-		return leftVal + rightVal, nil
-	case '-':
-		return leftVal - rightVal, nil
-	case '*':
-		return leftVal * rightVal, nil
-	case '/':
-		if rightVal == 0 {
-			return 0, fmt.Errorf("division by zero is not allowed")
-		}
-		return leftVal / rightVal, nil
-	default:
-		return 0, fmt.Errorf("unsupported operation '%c'", op)
-	}
+	return parseExpression(expr)
 }
 
-// parseFloat parses a string into a float64
-func parseFloat(s string) (float64, error) {
-	if s == "" {
-		return 0, fmt.Errorf("empty number")
+// parseExpression handles the main parsing logic
+func parseExpression(expr string) (float64, error) {
+	result, remaining, err := parseAddSubWithRemaining(expr)
+	if err != nil {
+		return 0, err
+	}
+	// Check for leftover characters (e.g., unmatched closing parentheses)
+	if len(remaining) > 0 {
+		return 0, fmt.Errorf("unexpected character '%c' at position %d", remaining[0], len(expr)-len(remaining))
+	}
+	return result, nil
+}
+
+// parseAddSubWithRemaining handles addition and subtraction and returns remaining string
+func parseAddSubWithRemaining(expr string) (float64, string, error) {
+	left, remaining, err := parseMulDiv(expr)
+	if err != nil {
+		return 0, "", err
 	}
 
-	return strconv.ParseFloat(s, 64)
+	for len(remaining) > 0 {
+		if remaining[0] != '+' && remaining[0] != '-' {
+			break
+		}
+		op := remaining[0]
+		remaining = remaining[1:]
+
+		// Check for consecutive operators
+		if len(remaining) == 0 {
+			return 0, "", fmt.Errorf("operator '%c' at end of expression", op)
+		}
+
+		right, newRemaining, err := parseMulDiv(remaining)
+		if err != nil {
+			return 0, "", err
+		}
+		remaining = newRemaining
+
+		if op == '+' {
+			left += right
+		} else {
+			left -= right
+		}
+	}
+
+	return left, remaining, nil
+}
+
+// parseMulDiv handles multiplication and division (higher precedence)
+func parseMulDiv(expr string) (float64, string, error) {
+	left, remaining, err := parseUnary(expr)
+	if err != nil {
+		return 0, "", err
+	}
+
+	for len(remaining) > 0 {
+		if remaining[0] != '*' && remaining[0] != '/' {
+			break
+		}
+		op := remaining[0]
+		remaining = remaining[1:]
+
+		// Check for consecutive operators
+		if len(remaining) == 0 {
+			return 0, "", fmt.Errorf("operator '%c' at end of expression", op)
+		}
+
+		right, newRemaining, err := parseUnary(remaining)
+		if err != nil {
+			return 0, "", err
+		}
+		remaining = newRemaining
+
+		if op == '*' {
+			left *= right
+		} else {
+			if right == 0 {
+				return 0, "", fmt.Errorf("division by zero is not allowed")
+			}
+			left /= right
+		}
+	}
+
+	return left, remaining, nil
+}
+
+// parseUnary handles unary operators (+ and -)
+func parseUnary(expr string) (float64, string, error) {
+	if len(expr) == 0 {
+		return 0, "", fmt.Errorf("unexpected end of expression")
+	}
+
+	if expr[0] == '+' {
+		return parseUnary(expr[1:])
+	}
+
+	if expr[0] == '-' {
+		val, remaining, err := parseUnary(expr[1:])
+		return -val, remaining, err
+	}
+
+	return parseFactor(expr)
+}
+
+// parseFactor handles numbers and parentheses (highest precedence)
+func parseFactor(expr string) (float64, string, error) {
+	if len(expr) == 0 {
+		return 0, "", fmt.Errorf("unexpected end of expression")
+	}
+
+	// Handle parentheses
+	if expr[0] == '(' {
+		// Find matching closing parenthesis
+		parenCount := 1
+		i := 1
+		for i < len(expr) && parenCount > 0 {
+			switch expr[i] {
+			case '(':
+				parenCount++
+			case ')':
+				parenCount--
+			}
+			i++
+		}
+
+		if parenCount > 0 {
+			return 0, "", fmt.Errorf("mismatched parentheses: missing closing parenthesis")
+		}
+
+		// Evaluate expression inside parentheses
+		innerExpr := expr[1 : i-1]
+		if len(innerExpr) == 0 {
+			return 0, "", fmt.Errorf("empty parentheses are not allowed")
+		}
+		result, err := parseExpression(innerExpr)
+		if err != nil {
+			return 0, "", err
+		}
+
+		return result, expr[i:], nil
+	}
+
+	// Handle numbers
+	return parseNumber(expr)
+}
+
+// parseNumber extracts and parses a number from the beginning of the expression
+func parseNumber(expr string) (float64, string, error) {
+	if len(expr) == 0 {
+		return 0, "", fmt.Errorf("unexpected end of expression")
+	}
+
+	i := 0
+	// Skip digits, decimal point, and scientific notation
+	for i < len(expr) {
+		c := expr[i]
+		if (c >= '0' && c <= '9') || c == '.' {
+			i++
+		} else if c == 'e' || c == 'E' {
+			// Handle scientific notation
+			i++
+			if i < len(expr) && (expr[i] == '+' || expr[i] == '-') {
+				i++
+			}
+			// Continue parsing digits after the exponent
+			for i < len(expr) && expr[i] >= '0' && expr[i] <= '9' {
+				i++
+			}
+		} else {
+			break
+		}
+	}
+
+	if i == 0 {
+		return 0, "", fmt.Errorf("expected number but found '%c'", expr[0])
+	}
+
+	numberStr := expr[:i]
+	val, err := strconv.ParseFloat(numberStr, 64)
+	if err != nil {
+		return 0, "", fmt.Errorf("invalid number format: %s", numberStr)
+	}
+
+	return val, expr[i:], nil
 }
 
 func removeSpaces(s string) string {

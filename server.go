@@ -20,7 +20,7 @@ import (
 
 const (
 	ServerName    = "mcp-calculator-server"
-	ServerVersion = "0.5.1"
+	ServerVersion = "0.5.3"
 )
 
 func main() {
@@ -47,7 +47,7 @@ func main() {
 }
 
 func createMCPServer() *server.MCPServer {
-	s := server.NewMCPServer(ServerName, ServerVersion)
+	s := server.NewMCPServer(ServerName, ServerVersion, server.WithElicitation())
 
 	log.Printf("Initializing MCP server: %s v%s", ServerName, ServerVersion)
 
@@ -64,12 +64,16 @@ func createMCPServer() *server.MCPServer {
 	// Random number generator tool
 	s.AddTool(mcp.NewTool(
 		"random_number",
-		mcp.WithDescription("Generate a random number within a specified range"),
+		mcp.WithDescription("Generate a random number within a specified range using various probability distributions"),
 		mcp.WithNumber("min",
 			mcp.Description("Minimum value (default: 1)"),
 		),
 		mcp.WithNumber("max",
 			mcp.Description("Maximum value (default: 100)"),
+		),
+		mcp.WithString("distribution",
+			mcp.Description("Probability distribution: 'uniform' (default), 'normal' (Gaussian/bell curve), or 'exponential' (exponential decay)"),
+			mcp.Enum("uniform", "normal", "exponential"),
 		),
 	), handleRandomNumber)
 
@@ -194,9 +198,81 @@ func handleCalculate(_ context.Context, request mcp.CallToolRequest) (*mcp.CallT
 	return mcp.NewToolResultText(fmt.Sprintf("Result: %s = %s", expression, formatResult(result))), nil
 }
 
-func handleRandomNumber(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// generateUniform creates a uniform random number in the range [min, max)
+func generateUniform(min, max float64) (float64, error) {
+	diff := max - min
+	precision := int64(10000) // 4 decimal places
+	maxInt := int64(diff * float64(precision))
+
+	if maxInt <= 0 {
+		maxInt = 1
+	}
+
+	randInt, err := rand.Int(rand.Reader, big.NewInt(maxInt))
+	if err != nil {
+		return 0, err
+	}
+
+	return min + (float64(randInt.Int64()) / float64(precision)), nil
+}
+
+// generateNormal creates a normal (Gaussian) random number in the range [min, max]
+func generateNormal(min, max float64) (float64, error) {
+	// Use Box-Muller transform to generate normal distribution
+	// Mean = (min + max) / 2, StdDev = (max - min) / 6 (so ~99.7% within range)
+	mean := (min + max) / 2
+	stdDev := (max - min) / 6
+
+	// Generate two uniform random numbers
+	u1, err := generateUniform(0, 1)
+	if err != nil {
+		return 0, err
+	}
+	u2, err := generateUniform(0, 1)
+	if err != nil {
+		return 0, err
+	}
+
+	// Box-Muller transform
+	z0 := math.Sqrt(-2*math.Log(u1)) * math.Cos(2*math.Pi*u2)
+	result := mean + z0*stdDev
+
+	// Clamp to range
+	if result < min {
+		result = min
+	}
+	if result > max {
+		result = max
+	}
+
+	return result, nil
+}
+
+// generateExponential creates an exponential random number in the range [min, max]
+func generateExponential(min, max float64) (float64, error) {
+	// Lambda = 1 / ((max - min) / 3) to get reasonable distribution in range
+	lambda := 3.0 / (max - min)
+
+	u, err := generateUniform(0, 1)
+	if err != nil {
+		return 0, err
+	}
+
+	// Inverse transform method: -ln(1-u) / lambda
+	result := min + (-math.Log(1-u) / lambda)
+
+	// Clamp to range
+	if result > max {
+		result = max
+	}
+
+	return result, nil
+}
+
+func handleRandomNumber(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := request.GetArguments()
 
+	// Extract parameters with defaults
 	minm := 1.0
 	maxi := 100.0
 
@@ -207,31 +283,105 @@ func handleRandomNumber(_ context.Context, request mcp.CallToolRequest) (*mcp.Ca
 		maxi = maxVal
 	}
 
+	distribution, hasDistribution := args["distribution"].(string)
+
+	// If no distribution specified, trigger elicitation
+	if !hasDistribution || distribution == "" {
+		log.Println("Distribution not specified, triggering elicitation")
+
+		// Get the server from context to access RequestElicitation
+		mcpServer := server.ServerFromContext(ctx)
+		if mcpServer == nil {
+			log.Println("No server in context, using default uniform distribution")
+			distribution = "uniform"
+		} else {
+			// Create elicitation request
+			elicitationReq := mcp.ElicitationRequest{
+				Params: mcp.ElicitationParams{
+					Message: "Which probability distribution would you like to use for the random number?",
+					RequestedSchema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"distribution": map[string]interface{}{
+								"type":        "string",
+								"enum":        []string{"uniform", "normal", "exponential"},
+								"description": "Probability distribution type:\n- uniform: Even spread across the range\n- normal: Bell curve (Gaussian) centered in the range\n- exponential: Exponential decay from minimum",
+							},
+						},
+						"required": []string{"distribution"},
+					},
+				},
+			}
+
+			// Request elicitation from the client
+			result, err := mcpServer.RequestElicitation(ctx, elicitationReq)
+			if err != nil {
+				log.Printf("Elicitation request failed: %v, using default uniform distribution", err)
+				return mcp.NewToolResultError("Elicitation request failed"), nil
+			} else {
+				// Check the user's response
+				switch result.Action {
+				case mcp.ElicitationResponseActionAccept:
+					// Extract distribution from the response content
+					if contentMap, ok := result.Content.(map[string]interface{}); ok {
+						if dist, ok := contentMap["distribution"].(string); ok {
+							distribution = dist
+						} else {
+							log.Println("Invalid distribution in response", dist)
+							return mcp.NewToolResultError("Invalid distribution in response"), nil
+						}
+					} else {
+						log.Println("Invalid response content format", result.Content)
+						return mcp.NewToolResultError("Invalid response contnet format"), nil
+					}
+				case mcp.ElicitationResponseActionDecline, mcp.ElicitationResponseActionCancel:
+					log.Printf("User %s the elicitation request, using default uniform distribution", result.Action)
+					distribution = "uniform"
+				default:
+					log.Printf("Unknown elicitation response action: %s, using default uniform", result.Action)
+					return mcp.NewToolResultError("Uknown elicitation response action"), nil
+
+				}
+			}
+		}
+	}
+
+	// Proceed with execution
+	return executeRandomNumber(minm, maxi, distribution)
+}
+
+// executeRandomNumber handles the actual random number generation
+func executeRandomNumber(minm, maxi float64, distribution string) (*mcp.CallToolResult, error) {
 	if minm >= maxi {
 		log.Printf("Random number error - invalid range: min=%.2f, max=%.2f", minm, maxi)
 		return mcp.NewToolResultError("Minimum value must be less than maximum value"), nil
 	}
 
-	// Generate random number
-	diff := maxi - minm
+	// Generate random number based on distribution
+	var result float64
+	var err error
 
-	precision := int64(10000) // 4 decimal places
-	maxInt := int64(diff * float64(precision))
-
-	if maxInt <= 0 {
-		maxInt = 1
+	switch distribution {
+	case "uniform":
+		result, err = generateUniform(minm, maxi)
+	case "normal":
+		result, err = generateNormal(minm, maxi)
+	case "exponential":
+		result, err = generateExponential(minm, maxi)
+	default:
+		log.Printf("Unknown distribution: %s", distribution)
+		return mcp.NewToolResultError(fmt.Sprintf("Unknown distribution: %s. Supported distributions are: uniform, normal, exponential", distribution)), nil
 	}
 
-	randInt, err := rand.Int(rand.Reader, big.NewInt(maxInt))
 	if err != nil {
 		log.Printf("Random number generation error: %v", err)
 		return mcp.NewToolResultError("Failed to generate random number"), nil
 	}
 
-	result := minm + (float64(randInt.Int64()) / float64(precision))
-
-	log.Printf("Generated random number: %.4f (range: %.2f-%.2f)", result, minm, maxi)
-	return mcp.NewToolResultText(fmt.Sprintf("Random number between %.2f and %.2f: %.6f", minm, maxi, result)), nil
+	log.Printf("Generated random number: %.4f (distribution: %s, range: %.2f-%.2f)", result, distribution, minm, maxi)
+	return mcp.NewToolResultText(
+		fmt.Sprintf("Random number (%s distribution) between %.2f and %.2f: %.6f",
+			distribution, minm, maxi, result)), nil
 }
 
 func handleMathConstants(_ context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {

@@ -59,3 +59,33 @@ func abs(x float64) float64 {
 	}
 	return x
 }
+
+// TestDistributionGenerators tests the three distribution generators
+func TestDistributionGenerators(t *testing.T) {
+	tests := []struct {
+		name    string
+		genFunc func(float64, float64) (float64, error)
+		min     float64
+		max     float64
+	}{
+		{"uniform", generateUniform, 0.0, 100.0},
+		{"normal", generateNormal, 0.0, 100.0},
+		{"exponential", generateExponential, 0.0, 100.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Generate 100 samples to verify they're within range
+			for i := 0; i < 100; i++ {
+				result, err := tt.genFunc(tt.min, tt.max)
+				if err != nil {
+					t.Fatalf("Generator failed: %v", err)
+				}
+				if result < tt.min || result > tt.max {
+					t.Errorf("Result %.2f outside range [%.2f, %.2f]",
+						result, tt.min, tt.max)
+				}
+			}
+		})
+	}
+}

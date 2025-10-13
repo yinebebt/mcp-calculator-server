@@ -6,7 +6,7 @@ A Model Context Protocol (MCP) server that provides calculator functionality wit
 
 ### Tools
 - **calculate**: Mathematical operations with proper operator precedence, parentheses support, and scientific notation
-- **random_number**: Generate random numbers within specified ranges
+- **random_number**: Generate random numbers within specified ranges using various probability distributions(elicitation).
 
 ### Resources
 - **math://constants**: Mathematical constants (π, e, φ, √2, ln2, ln10) in JSON format

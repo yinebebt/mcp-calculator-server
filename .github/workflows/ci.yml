@@ -77,6 +77,41 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Tag format verified: $VERSION"
 
+      - name: Get previous tag for changelog
+        id: previous_tag
+        run: |
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # Try to find any previous tag
+            PREVIOUS_TAG=$(git tag --sort=-version:refname | sed -n '2p' 2>/dev/null || echo "")
+          fi
+          echo "previous_tag=$PREVIOUS_TAG" >> $GITHUB_OUTPUT
+          echo "Previous tag: ${PREVIOUS_TAG:-none}"
+
+      - name: Generate release body
+        id: release_body
+        run: |
+          VERSION="${{ steps.tag_version.outputs.version }}"
+          PREVIOUS_TAG="${{ steps.previous_tag.outputs.previous_tag }}"
+          
+          DELIMITER=$(openssl rand -hex 16)
+          {
+            echo "body<<${DELIMITER}"
+            echo "## Installation"
+            echo ""
+            echo '```bash'
+            echo "go get github.com/yinebebt/mcp-calculator-server@${VERSION}"
+            echo '```'
+            
+            if [ -n "$PREVIOUS_TAG" ]; then
+              echo ""
+              echo "## Full Changelog"
+              echo ""
+              echo "[Full Changelog](https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${VERSION})"
+            fi
+            echo "${DELIMITER}"
+          } >> $GITHUB_OUTPUT
+
       - name: Publish module to Go proxy
         env:
           GOPROXY: https://proxy.golang.org
@@ -92,12 +127,7 @@ jobs:
         with:
           tag_name: ${{ steps.tag_version.outputs.version }}
           name: Release ${{ steps.tag_version.outputs.version }}
-          body: |
-            ## Installation
-
-            ```bash
-            go get github.com/yinebebt/mcp-calculator-server@${{ steps.tag_version.outputs.version }}
-            ```
+          body: ${{ steps.release_body.outputs.body }}
           draft: false
           prerelease: false
 

@@ -5,22 +5,27 @@ A Model Context Protocol (MCP) server that provides calculator functionality wit
 ## Features
 
 ### Tools
+
 - **calculate**: Mathematical operations with proper operator precedence, parentheses support, and scientific notation
 - **random_number**: Generate random numbers within specified ranges using various probability distributions(elicitation).
 
 ### Resources
+
 - **math://constants**: Mathematical constants (π, e, φ, √2, ln2, ln10) in JSON format
 - **server://info**: Server information and capabilities overview
 
 ### Prompts
+
 - **math_problem**: Generate mathematical word problems with configurable difficulty and topics
 - **explain_calculation**: Step-by-step mathematical expression explanations
 
 ### Transport Modes
+
 - **stdio**: For local development and MCP Inspector integration
 - **streamable-http**: For web deployments and container environments
 
 **Default Behavior:**
+
 - Transport: `streamable-http` (if no TRANSPORT environment variable is set)
 - Port: `8080` (configurable via PORT environment variable)
 
@@ -41,6 +46,7 @@ go test
 ```
 
 ### MCP Client Configuration
+
 For testing with MCP Client:
 
 ```json

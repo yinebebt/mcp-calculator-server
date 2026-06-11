@@ -1,0 +1,30 @@
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.ServerVersion={{ .Version }}
+
+archives:
+  - format_overrides:
+      - goos: windows
+        formats: [zip]
+
+release:
+  prerelease: auto
+  footer: |
+    ## Installation
+
+    Download the binary for your platform above, or install with Go:
+
+    ```bash
+    go install github.com/yinebebt/mcp-calculator-server@{{ .Tag }}
+    ```

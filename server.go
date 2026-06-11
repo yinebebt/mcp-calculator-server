@@ -3,15 +3,21 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -20,75 +26,121 @@ import (
 
 const (
 	ServerName    = "mcp-calculator-server"
-	ServerVersion = "0.5.4"
+	ServerWebsite = "https://github.com/yinebebt/mcp-calculator-server"
 )
 
+// ServerVersion is overridden at release time via
+// -ldflags "-X main.ServerVersion=...".
+var ServerVersion = "0.6.0"
+
+const serverIconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2" fill="#4a90d9"/><rect x="6" y="4" width="12" height="5" rx="1" fill="#fff"/><circle cx="8" cy="13" r="1.3" fill="#fff"/><circle cx="12" cy="13" r="1.3" fill="#fff"/><circle cx="16" cy="13" r="1.3" fill="#fff"/><circle cx="8" cy="17" r="1.3" fill="#fff"/><circle cx="12" cy="17" r="1.3" fill="#fff"/><circle cx="16" cy="17" r="1.3" fill="#fff"/></svg>`
+
+var mathConstants = map[string]float64{
+	"pi":    math.Pi,
+	"e":     math.E,
+	"phi":   math.Phi,
+	"sqrt2": math.Sqrt2,
+	"ln2":   math.Ln2,
+	"ln10":  math.Log(10),
+}
+
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	slog.SetDefault(logger)
+
 	transport := os.Getenv("TRANSPORT")
 	if transport == "" {
 		transport = "streamable-http"
 	}
-	log.Printf("Starting with transport: %s", transport)
+	slog.Info("starting server", "name", ServerName, "version", ServerVersion, "transport", transport)
 
-	s := createMCPServer()
+	s := createMCPServer(logger)
 
-	// Start server with appropriate transport
 	switch transport {
 	case "stdio":
-		log.Println("starting server with stdio transport")
 		if err := s.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-			log.Fatalf("Stdio server error: %v", err)
+			slog.Error("stdio server error", "error", err)
+			os.Exit(1)
 		}
 	case "streamable-http":
-		startHTTPServer(s)
+		if err := startHTTPServer(s); err != nil {
+			slog.Error("HTTP server error", "error", err)
+			os.Exit(1)
+		}
 	default:
-		log.Fatalf("Unsupported transport: %s (supported: stdio or streamable-http)", transport)
+		slog.Error("unsupported transport (supported: stdio or streamable-http)", "transport", transport)
+		os.Exit(1)
 	}
 }
 
-func createMCPServer() *mcp.Server {
+func createMCPServer(logger *slog.Logger) *mcp.Server {
+	serverIcons := []mcp.Icon{{
+		Source:   "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(serverIconSVG)),
+		MIMEType: "image/svg+xml",
+		Sizes:    []string{"any"},
+	}}
+
 	s := mcp.NewServer(&mcp.Implementation{
-		Name:    ServerName,
-		Version: ServerVersion,
-	}, nil)
+		Name:       ServerName,
+		Title:      "Calculator",
+		Version:    ServerVersion,
+		WebsiteURL: ServerWebsite,
+		Icons:      serverIcons,
+	}, &mcp.ServerOptions{
+		Instructions: "Mathematical utility server. Use the calculate tool for arithmetic " +
+			"expressions, random_number for random values, and the math://constants resources " +
+			"for common mathematical constants.",
+		Logger:            logger,
+		CompletionHandler: handleCompletion,
+	})
 
-	log.Printf("Initializing MCP server: %s v%s", ServerName, ServerVersion)
+	readOnly := &mcp.ToolAnnotations{
+		ReadOnlyHint:  true,
+		OpenWorldHint: ptr(false),
+	}
 
-	// Calculator tool
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "calculate",
+		Title:       "Calculator",
 		Description: "Perform basic mathematical operations like add, subtract, multiply, and divide",
+		Annotations: readOnly,
+		Icons:       serverIcons,
 	}, handleCalculate)
 
-	// Random number generator tool
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "random_number",
+		Title:       "Random Number Generator",
 		Description: "Generate a random number within a specified range using various probability distributions",
+		Annotations: readOnly,
 	}, handleRandomNumber)
 
-	log.Println("Loaded tools: calculate, random_number")
-
-	// Math constants resource
 	s.AddResource(&mcp.Resource{
 		URI:         "math://constants",
-		Name:        "Mathematical Constants",
+		Name:        "math_constants",
+		Title:       "Mathematical Constants",
 		Description: "Common mathematical constants and their values",
 		MIMEType:    "application/json",
 	}, handleMathConstants)
 
-	// Server information resource
+	s.AddResourceTemplate(&mcp.ResourceTemplate{
+		URITemplate: "math://constants/{name}",
+		Name:        "math_constant",
+		Title:       "Mathematical Constant",
+		Description: "A single mathematical constant by name: pi, e, phi, sqrt2, ln2, ln10",
+		MIMEType:    "application/json",
+	}, handleMathConstant)
+
 	s.AddResource(&mcp.Resource{
 		URI:         "server://info",
-		Name:        "Server Information",
+		Name:        "server_info",
+		Title:       "Server Information",
 		Description: "Information about this MCP server",
 		MIMEType:    "text/plain",
 	}, handleServerInfo)
 
-	log.Println("Loaded resources: math://constants, server://info")
-
-	// Math problem generator prompt
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "math_problem",
+		Title:       "Math Problem Generator",
 		Description: "Generate a mathematical word problem",
 		Arguments: []*mcp.PromptArgument{
 			{
@@ -104,9 +156,9 @@ func createMCPServer() *mcp.Server {
 		},
 	}, handleMathProblemPrompt)
 
-	// Calculation explanation prompt
 	s.AddPrompt(&mcp.Prompt{
 		Name:        "explain_calculation",
+		Title:       "Calculation Explainer",
 		Description: "Explain how to solve a mathematical expression step by step",
 		Arguments: []*mcp.PromptArgument{
 			{
@@ -117,21 +169,22 @@ func createMCPServer() *mcp.Server {
 		},
 	}, handleExplainCalculationPrompt)
 
-	log.Println("Loaded prompts: math_problem, explain_calculation")
-	log.Println("MCP server initialization complete")
+	slog.Info("MCP server initialization complete",
+		"tools", "calculate, random_number",
+		"resources", "math://constants, math://constants/{name}, server://info",
+		"prompts", "math_problem, explain_calculation")
 
 	return s
 }
 
-func startHTTPServer(s *mcp.Server) {
-	port := "8080"
-	if portStr := os.Getenv("PORT"); portStr != "" {
-		port = portStr
+func ptr[T any](v T) *T { return &v }
+
+func startHTTPServer(s *mcp.Server) error {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
 
-	log.Printf("starting server with streamable-http transport on port %s", port)
-
-	// Create streamable HTTP handler
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return s
 	}, &mcp.StreamableHTTPOptions{
@@ -139,116 +192,124 @@ func startHTTPServer(s *mcp.Server) {
 		Stateless:      false,
 	})
 
-	// Create HTTP mux for additional endpoints
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("OK")); err != nil {
-			log.Printf("Health check write error: %v", err)
+			slog.Error("health check write error", "error", err)
 		}
 	})
-
-	// Mount the MCP streamable HTTP handler at /mcp
 	mux.Handle("/mcp", handler)
 
-	// Start HTTP server
-	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), mux); err != nil {
-		log.Fatalf("HTTP server error: %v", err)
+	// No ReadTimeout/WriteTimeout: streamable HTTP relies on long-lived SSE streams.
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+	slog.Info("HTTP server listening", "port", port)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		slog.Info("shutdown signal received, draining connections")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		// Long-lived SSE streams never go idle, so Shutdown routinely times
+		// out; force-close the remainder instead of reporting a crash.
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Info("forcing close after shutdown timeout", "error", err)
+			return srv.Close()
+		}
+		return nil
 	}
 }
 
-func handleCalculate(ctx context.Context, req *mcp.CallToolRequest, input struct {
-	Expression string `json:"expression" jsonschema:"A mathematical expression to evaluate (e.g., '2 + 3', '10 * 5', '15 / 3')"`
-}) (*mcp.CallToolResult, struct {
+// textOutput is the structured output returned by both tools.
+type textOutput struct {
 	Result string `json:"result"`
-}, error) {
+}
+
+// toolError builds an error CallToolResult without failing the request.
+func toolError(msg string) (*mcp.CallToolResult, textOutput, error) {
+	return &mcp.CallToolResult{
+		IsError: true,
+		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+	}, textOutput{}, nil
+}
+
+// sessionLog forwards a log message to the connected client via MCP logging,
+// in addition to the server's own stderr logging.
+func sessionLog(ctx context.Context, ss *mcp.ServerSession, msg string, args ...any) {
+	if ss == nil {
+		return
+	}
+	slog.New(mcp.NewLoggingHandler(ss, nil)).InfoContext(ctx, msg, args...)
+}
+
+type calculateInput struct {
+	Expression string `json:"expression" jsonschema:"A mathematical expression to evaluate (e.g., '2 + 3', '10 * 5', '15 / 3')"`
+}
+
+func handleCalculate(ctx context.Context, req *mcp.CallToolRequest, input calculateInput) (*mcp.CallToolResult, textOutput, error) {
 	expression := input.Expression
 
-	// Validate expression length and characters
 	if len(expression) == 0 {
-		log.Printf("Calculate error - empty expression")
-		return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "Expression cannot be empty"},
-				},
-			}, struct {
-				Result string `json:"result"`
-			}{}, nil
+		slog.Warn("calculate: empty expression")
+		return toolError("Expression cannot be empty")
 	}
 
 	if len(expression) > 500 {
-		log.Printf("Calculate error - expression too long: %d characters", len(expression))
-		return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "Expression too long (maximum 500 characters)"},
-				},
-			}, struct {
-				Result string `json:"result"`
-			}{}, nil
+		slog.Warn("calculate: expression too long", "length", len(expression))
+		return toolError("Expression too long (maximum 500 characters)")
 	}
 
-	// Check for valid characters
-	validChars := "0123456789+-*/.()eE "
+	const validChars = "0123456789+-*/.()eE "
 	for _, char := range expression {
 		if !strings.ContainsRune(validChars, char) {
-			log.Printf("Calculate error - invalid character: %c", char)
-			return &mcp.CallToolResult{
-					IsError: true,
-					Content: []mcp.Content{
-						&mcp.TextContent{Text: fmt.Sprintf("Invalid character in expression: '%c'", char)},
-					},
-				}, struct {
-					Result string `json:"result"`
-				}{}, nil
+			slog.Warn("calculate: invalid character", "char", string(char))
+			return toolError(fmt.Sprintf("Invalid character in expression: '%c'", char))
 		}
 	}
 
 	result, err := evaluateExpression(expression)
 	if err != nil {
-		log.Printf("Calculate error - evaluation failed: %v", err)
-		return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: fmt.Sprintf("Calculation error: %v", err)},
-				},
-			}, struct {
-				Result string `json:"result"`
-			}{}, nil
+		slog.Warn("calculate: evaluation failed", "error", err)
+		return toolError(fmt.Sprintf("Calculation error: %v", err))
 	}
 
-	// Check for special float values, NaN check
-	if math.IsNaN(result) {
-		log.Printf("Calculate error - result is NaN")
-		return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "Calculation resulted in an invalid number (NaN)"},
-				},
-			}, struct {
-				Result string `json:"result"`
-			}{}, nil
+	if math.IsNaN(result) || math.IsInf(result, 0) {
+		slog.Warn("calculate: non-finite result", "expression", expression)
+		return toolError("Calculation resulted in a non-finite number (NaN or infinity)")
 	}
 
 	resultStr := fmt.Sprintf("Result: %s = %s", expression, formatResult(result))
-	log.Printf("Calculate result: %s = %s", expression, formatResult(result))
-	return nil, struct {
-		Result string `json:"result"`
-	}{
-		Result: resultStr,
-	}, nil
+	slog.Info("calculate", "expression", expression, "result", formatResult(result))
+	sessionLog(ctx, req.Session, "calculate", "expression", expression, "result", formatResult(result))
+	return nil, textOutput{Result: resultStr}, nil
 }
 
 // generateUniform creates a uniform random number in the range [min, max)
 func generateUniform(min, max float64) (float64, error) {
-	diff := max - min
-	precision := int64(10000) // 4 decimal places
-	maxInt := int64(diff * float64(precision))
+	const minSteps = 10000 // at least 4 decimal places of granularity
+	scaled := (max - min) * minSteps
 
-	if maxInt <= 0 {
-		maxInt = 1
+	// Clamp to a valid big.Int bound: rand.Int panics on non-positive values,
+	// and large ranges overflow int64. A NaN scaled falls through to minSteps.
+	var maxInt int64 = minSteps
+	switch {
+	case scaled >= math.MaxInt64:
+		maxInt = math.MaxInt64
+	case scaled > minSteps:
+		maxInt = int64(scaled)
 	}
 
 	randInt, err := rand.Int(rand.Reader, big.NewInt(maxInt))
@@ -256,7 +317,10 @@ func generateUniform(min, max float64) (float64, error) {
 		return 0, err
 	}
 
-	return min + (float64(randInt.Int64()) / float64(precision)), nil
+	// Interpolate rather than offset from min, so spans that overflow float64
+	// or exceed int64 precision stay uniform across the whole range.
+	frac := float64(randInt.Int64()) / float64(maxInt)
+	return min*(1-frac) + max*frac, nil
 }
 
 // generateNormal creates a normal (Gaussian) random number in the range [min, max]
@@ -274,6 +338,11 @@ func generateNormal(min, max float64) (float64, error) {
 	u2, err := generateUniform(0, 1)
 	if err != nil {
 		return 0, err
+	}
+
+	// generateUniform can return exactly 0; log(0) would yield -Inf.
+	if u1 <= 0 {
+		u1 = 1e-9
 	}
 
 	// Box-Muller transform
@@ -312,13 +381,13 @@ func generateExponential(min, max float64) (float64, error) {
 	return result, nil
 }
 
-func handleRandomNumber(ctx context.Context, req *mcp.CallToolRequest, input struct {
+type randomNumberInput struct {
 	Min          *float64 `json:"min,omitempty" jsonschema:"Minimum value (default: 1)"`
 	Max          *float64 `json:"max,omitempty" jsonschema:"Maximum value (default: 100)"`
 	Distribution *string  `json:"distribution,omitempty" jsonschema:"Probability distribution: 'uniform' (default), 'normal' (Gaussian/bell curve), or 'exponential' (exponential decay)"`
-}) (*mcp.CallToolResult, struct {
-	Result string `json:"result"`
-}, error) {
+}
+
+func handleRandomNumber(ctx context.Context, req *mcp.CallToolRequest, input randomNumberInput) (*mcp.CallToolResult, textOutput, error) {
 	minm := 1.0
 	maxi := 100.0
 
@@ -329,83 +398,21 @@ func handleRandomNumber(ctx context.Context, req *mcp.CallToolRequest, input str
 		maxi = *input.Max
 	}
 
+	// Validate the range before potentially bothering the user with elicitation.
+	if minm >= maxi {
+		slog.Warn("random_number: invalid range", "min", minm, "max", maxi)
+		return toolError("Minimum value must be less than maximum value")
+	}
+
 	var distribution string
 	if input.Distribution != nil && *input.Distribution != "" {
 		distribution = *input.Distribution
 	} else {
-		// If no distribution specified, trigger elicitation
-		if req.Session != nil {
-			log.Println("Distribution not specified, triggering elicitation")
-
-			// Create elicitation request using official SDK
-			distSchema := &jsonschema.Schema{
-				Type: "object",
-				Properties: map[string]*jsonschema.Schema{
-					"distribution": {
-						Type:        "string",
-						Enum:        []any{"uniform", "normal", "exponential"},
-						Description: "Probability distribution type:\n- uniform: Even spread across the range\n- normal: Bell curve (Gaussian) centered in the range\n- exponential: Exponential decay from minimum",
-					},
-				},
-				Required: []string{"distribution"},
-			}
-
-			elicitResult, err := req.Session.Elicit(ctx, &mcp.ElicitParams{
-				Message:         "Which probability distribution would you like to use for the random number?",
-				RequestedSchema: distSchema,
-			})
-
-			if err != nil {
-				log.Printf("Elicitation request failed: %v, using default uniform distribution", err)
-				distribution = "uniform"
-			} else {
-				switch elicitResult.Action {
-				case "accept":
-					// ElicitResult.Content is already map[string]any
-					if dist, ok := elicitResult.Content["distribution"].(string); ok {
-						distribution = dist
-						log.Printf("User selected distribution: %s", distribution)
-					} else {
-						log.Println("Invalid distribution in response, using default uniform")
-						distribution = "uniform"
-					}
-				case "decline", "cancel":
-					log.Printf("User %s the elicitation request, using default uniform distribution", elicitResult.Action)
-					distribution = "uniform"
-				default:
-					log.Printf("Unknown elicitation response action: %s, using default uniform", elicitResult.Action)
-					distribution = "uniform"
-				}
-			}
-		} else {
-			log.Println("No session available for elicitation, using default uniform distribution")
-			distribution = "uniform"
-		}
+		distribution = elicitDistribution(ctx, req.Session)
 	}
 
-	// Validate distribution
 	if distribution != "uniform" && distribution != "normal" && distribution != "exponential" {
-		return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: fmt.Sprintf("Unknown distribution: %s. Supported distributions are: uniform, normal, exponential", distribution)},
-				},
-			}, struct {
-				Result string `json:"result"`
-			}{}, nil
-	}
-
-	// Generate random number
-	if minm >= maxi {
-		log.Printf("Random number error - invalid range: min=%.2f, max=%.2f", minm, maxi)
-		return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "Minimum value must be less than maximum value"},
-				},
-			}, struct {
-				Result string `json:"result"`
-			}{}, nil
+		return toolError(fmt.Sprintf("Unknown distribution: %s. Supported distributions are: uniform, normal, exponential", distribution))
 	}
 
 	var result float64
@@ -421,39 +428,98 @@ func handleRandomNumber(ctx context.Context, req *mcp.CallToolRequest, input str
 	}
 
 	if err != nil {
-		log.Printf("Random number generation error: %v", err)
-		return &mcp.CallToolResult{
-				IsError: true,
-				Content: []mcp.Content{
-					&mcp.TextContent{Text: "Failed to generate random number"},
-				},
-			}, struct {
-				Result string `json:"result"`
-			}{}, nil
+		slog.Error("random_number: generation failed", "error", err)
+		return toolError("Failed to generate random number")
 	}
 
 	resultStr := fmt.Sprintf("Random number (%s distribution) between %.2f and %.2f: %.6f", distribution, minm, maxi, result)
-	log.Printf("Generated random number: %.4f (distribution: %s, range: %.2f-%.2f)", result, distribution, minm, maxi)
-	return nil, struct {
-		Result string `json:"result"`
-	}{
-		Result: resultStr,
-	}, nil
+	slog.Info("random_number", "result", result, "distribution", distribution, "min", minm, "max", maxi)
+	sessionLog(ctx, req.Session, "random_number", "result", result, "distribution", distribution)
+	return nil, textOutput{Result: resultStr}, nil
+}
+
+// elicitDistribution asks the client which distribution to use, falling back
+// to uniform when elicitation is unavailable, declined, or fails.
+func elicitDistribution(ctx context.Context, ss *mcp.ServerSession) string {
+	if ss == nil {
+		slog.Info("random_number: no session for elicitation, defaulting to uniform")
+		return "uniform"
+	}
+
+	slog.Info("random_number: distribution not specified, eliciting from client")
+
+	distSchema := &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"distribution": {
+				Type:        "string",
+				Enum:        []any{"uniform", "normal", "exponential"},
+				Description: "Probability distribution type:\n- uniform: Even spread across the range\n- normal: Bell curve (Gaussian) centered in the range\n- exponential: Exponential decay from minimum",
+			},
+		},
+		Required: []string{"distribution"},
+	}
+
+	elicitResult, err := ss.Elicit(ctx, &mcp.ElicitParams{
+		Message:         "Which probability distribution would you like to use for the random number?",
+		RequestedSchema: distSchema,
+	})
+	if err != nil {
+		slog.Warn("random_number: elicitation failed, defaulting to uniform", "error", err)
+		return "uniform"
+	}
+
+	switch elicitResult.Action {
+	case "accept":
+		if dist, ok := elicitResult.Content["distribution"].(string); ok {
+			slog.Info("random_number: user selected distribution", "distribution", dist)
+			return dist
+		}
+		slog.Warn("random_number: invalid distribution in elicitation response, defaulting to uniform")
+	case "decline", "cancel":
+		slog.Info("random_number: elicitation not accepted, defaulting to uniform", "action", elicitResult.Action)
+	default:
+		slog.Warn("random_number: unknown elicitation action, defaulting to uniform", "action", elicitResult.Action)
+	}
+	return "uniform"
 }
 
 func handleMathConstants(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-	log.Printf("Resource access: %s", req.Params.URI)
+	slog.Info("resource access", "uri", req.Params.URI)
 
-	constants := map[string]interface{}{
-		"pi":    3.141592653589793,
-		"e":     2.718281828459045,
-		"phi":   1.618033988749895, // Golden ratio
-		"sqrt2": 1.4142135623730951,
-		"ln2":   0.6931471805599453,
-		"ln10":  2.302585092994046,
+	data, err := json.MarshalIndent(mathConstants, "", "  ")
+	if err != nil {
+		return nil, err
 	}
 
-	data, _ := json.MarshalIndent(constants, "", "  ")
+	return &mcp.ReadResourceResult{
+		Contents: []*mcp.ResourceContents{
+			{
+				URI:      req.Params.URI,
+				MIMEType: "application/json",
+				Text:     string(data),
+			},
+		},
+	}, nil
+}
+
+func handleMathConstant(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+	slog.Info("resource access", "uri", req.Params.URI)
+
+	name, err := url.PathUnescape(strings.TrimPrefix(req.Params.URI, "math://constants/"))
+	if err != nil {
+		return nil, mcp.ResourceNotFoundError(req.Params.URI)
+	}
+	name = strings.ToLower(name)
+	value, ok := mathConstants[name]
+	if !ok {
+		return nil, mcp.ResourceNotFoundError(req.Params.URI)
+	}
+
+	data, err := json.Marshal(map[string]float64{name: value})
+	if err != nil {
+		return nil, err
+	}
 
 	return &mcp.ReadResourceResult{
 		Contents: []*mcp.ResourceContents{
@@ -472,19 +538,22 @@ func handleServerInfo(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.R
 
 Server Name: %s
 Version: %s
+Runtime: %s
 Protocol: Model Context Protocol (MCP)
 Capabilities:
   - Tools: 2 available (calculate, random_number)
   - Resources: 2 available (math constants, server info)
+  - Resource Templates: 1 available (math://constants/{name})
   - Prompts: 2 available (math problem, explain calculation)
+  - Completions: prompt argument and constant-name completion
+  - Logging: MCP log messages forwarded to the client
 
 Transport Support:
   - stdio: For local development and MCP Inspector
   - streamable-http: For web deployments and containers
 
-This server provides mathematical operations for testing MCP implementations.
-
-Last updated: %s`, ServerName, ServerVersion, time.Now().Format(time.RFC3339))
+This server provides mathematical operations for testing MCP implementations.`,
+		ServerName, ServerVersion, runtime.Version())
 
 	return &mcp.ReadResourceResult{
 		Contents: []*mcp.ResourceContents{
@@ -493,6 +562,46 @@ Last updated: %s`, ServerName, ServerVersion, time.Now().Format(time.RFC3339))
 				MIMEType: "text/plain",
 				Text:     info,
 			},
+		},
+	}, nil
+}
+
+// promptArgumentCompletions lists completion candidates per prompt argument.
+var promptArgumentCompletions = map[string]map[string][]string{
+	"math_problem": {
+		"difficulty": {"easy", "medium", "hard"},
+		"topic":      {"addition", "subtraction", "multiplication", "division", "mixed"},
+	},
+}
+
+func handleCompletion(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
+	var candidates []string
+
+	switch req.Params.Ref.Type {
+	case "ref/prompt":
+		candidates = promptArgumentCompletions[req.Params.Ref.Name][req.Params.Argument.Name]
+	case "ref/resource":
+		if req.Params.Ref.URI == "math://constants/{name}" && req.Params.Argument.Name == "name" {
+			for name := range mathConstants {
+				candidates = append(candidates, name)
+			}
+		}
+	}
+
+	prefix := strings.ToLower(req.Params.Argument.Value)
+	values := []string{}
+	for _, c := range candidates {
+		if strings.HasPrefix(c, prefix) {
+			values = append(values, c)
+		}
+	}
+	// Constant names come from map iteration; keep client-visible order stable.
+	slices.Sort(values)
+
+	return &mcp.CompleteResult{
+		Completion: mcp.CompletionResultDetails{
+			Values: values,
+			Total:  len(values),
 		},
 	}, nil
 }
@@ -509,7 +618,7 @@ func handleMathProblemPrompt(ctx context.Context, req *mcp.GetPromptRequest) (*m
 		topic = args
 	}
 
-	log.Printf("Math problem prompt - difficulty: %s, topic: %s", difficulty, topic)
+	slog.Info("math_problem prompt", "difficulty", difficulty, "topic", topic)
 
 	var prompt string
 	switch strings.ToLower(difficulty) {

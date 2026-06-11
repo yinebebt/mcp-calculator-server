@@ -132,7 +132,7 @@ func (c *Client) initializeConnection() error {
 		ID:      &c.messageID,
 		Method:  "initialize",
 		Params: map[string]interface{}{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": "2025-11-25",
 			"capabilities":    map[string]interface{}{},
 			"clientInfo": map[string]string{
 				"name":    "test-client",

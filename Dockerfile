@@ -1,10 +1,10 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache git ca-certificates
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN GOOS=linux go build -o mcp-calculator-server ./server.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o mcp-calculator-server .
 
 FROM alpine:3.21
 RUN apk --no-cache add ca-certificates wget

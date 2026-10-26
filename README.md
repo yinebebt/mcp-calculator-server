@@ -31,15 +31,15 @@ Both tools declare tool annotations (read-only, closed-world hints), titles, and
 
 ### Transport Modes
 
-- **stdio**: For local development and MCP Inspector integration
-- **streamable-http**: For web deployments and container environments (with graceful shutdown)
+- **stdio**: For local clients (Cursor, Claude Desktop, MCP Inspector). Use this unless you have a reason not to.
+- **streamable-http**: For trusted networks only. Binds all interfaces with **no authentication and no Origin check**. Put it behind a reverse proxy that enforces auth (and Origin) or do not expose it.
 
-> **Note:** The HTTP transport binds all interfaces with no authentication or Origin validation — intended for demos and trusted networks only. Put it behind a reverse proxy (or use stdio) for anything else.
+**Defaults:**
 
-**Default Behavior:**
+- Transport: `streamable-http` if `TRANSPORT` is unset (convenient for demos; **not** a production default)
+- Port: `8080` (`PORT`)
 
-- Transport: `streamable-http` (if no TRANSPORT environment variable is set)
-- Port: `8080` (configurable via PORT environment variable)
+For anything that is not a throwaway demo, run `TRANSPORT=stdio` or terminate TLS and auth in front of HTTP.
 
 ## Installation
 
